@@ -961,13 +961,18 @@ async function init() {
     initTheme();
     showLoading();
     
-    await Promise.all([
-        loadProjects(),
-        loadLabels(),
-        loadTasks()
-    ]);
-    
-    hideLoading();
+    try {
+        await Promise.all([
+            loadProjects(),
+            loadLabels(),
+            loadTasks()
+        ]);
+    } catch (error) {
+        console.error('Init error:', error);
+        showToast('Failed to load data: ' + error.message, 'error');
+    } finally {
+        hideLoading();
+    }
 }
 
 init();

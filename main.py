@@ -1,26 +1,28 @@
 """
 TaskFlow - Beautiful Task Tracker (Production Version)
-Main FastAPI Application
+Main FastAPI Application with Session-Based Auth
 """
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Query, status, Request, Response, Cookie
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session as DBSession
 from sqlalchemy import func, and_, or_
 from typing import Optional
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import json
+import secrets
 
 from app.database import get_db, init_db
-from app.models import Task, Project, Label, Subtask, Comment, Board, TaskStatus, TaskPriority, task_labels
+from app.models import Task, Project, Label, Subtask, Comment, Board, TaskStatus, TaskPriority, task_labels, User, hash_password
 from app.schemas import (
     TaskCreate, TaskUpdate, TaskResponse, TaskBrief, TaskStatistics,
     ProjectCreate, ProjectResponse,
     LabelCreate, LabelResponse,
     SubtaskCreate, SubtaskUpdate, SubtaskResponse,
     CommentCreate, CommentResponse,
-    BoardCreate, BoardResponse
+    BoardCreate, BoardResponse,
+    UserCreate, UserLogin, UserResponse, UserPublic
 )
 
 app = FastAPI(
@@ -29,10 +31,29 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# In-memory session store (use Redis in production)
+sessions: dict[str, int] = {}
+
 # Mount static files
 static_path = Path(__file__).parent / "static"
 if static_path.exists():
     app.mount("/static", StaticFiles(directory=static_path), name="static")
+
+
+def get_current_user(session_id: Optional[str] = Cookie(None), db: DBSession = Depends(get_db)) -> Optional[User]:
+    """Get current user from session cookie"""
+    if not session_id or session_id not in sessions:
+        return None
+    user_id = sessions[session_id]
+    return db.query(User).filter(User.id == user_id).first()
+
+
+def require_auth(session_id: Optional[str] = Cookie(None), db: DBSession = Depends(get_db)) -> User:
+    """Require authenticated user"""
+    user = get_current_user(session_id, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
 
 
 @app.on_event("startup")
@@ -45,16 +66,95 @@ def root():
     return FileResponse(static_path / "index.html")
 
 
+@app.get("/login")
+def login_page():
+    return FileResponse(static_path / "login.html")
+
+
+@app.get("/register")
+def register_page():
+    return FileResponse(static_path / "register.html")
+
+
+# ==================== AUTH ENDPOINTS ====================
+
+@app.post("/api/auth/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+def register(user: UserCreate, response: Response, db: DBSession = Depends(get_db)):
+    """Register a new user"""
+    # Check if email exists
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # Check if username exists
+    if db.query(User).filter(User.username == user.username).first():
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    # Create user
+    password_hash, password_salt = hash_password(user.password)
+    db_user = User(
+        email=user.email,
+        username=user.username,
+        full_name=user.full_name,
+        password_hash=password_hash,
+        password_salt=password_salt,
+        avatar_color=f"#{secrets.token_hex(3)}"
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    # Create session
+    session_id = secrets.token_urlsafe(32)
+    sessions[session_id] = db_user.id
+    response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
+    
+    return db_user
+
+
+@app.post("/api/auth/login", response_model=UserResponse)
+def login(credentials: UserLogin, response: Response, db: DBSession = Depends(get_db)):
+    """Login user"""
+    user = db.query(User).filter(User.email == credentials.email).first()
+    if not user or not user.verify_password(credentials.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    # Update last login
+    user.last_login = datetime.now(timezone.utc)
+    db.commit()
+    
+    # Create session
+    session_id = secrets.token_urlsafe(32)
+    sessions[session_id] = user.id
+    response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
+    
+    return user
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response, session_id: Optional[str] = Cookie(None)):
+    """Logout user"""
+    if session_id and session_id in sessions:
+        del sessions[session_id]
+    response.delete_cookie(key="session_id")
+    return {"message": "Logged out"}
+
+
+@app.get("/api/auth/me", response_model=UserResponse)
+def get_me(user: User = Depends(require_auth)):
+    """Get current user"""
+    return user
+
+
 # ==================== BOARD ENDPOINTS ====================
 
 @app.get("/api/boards", response_model=list[BoardResponse])
-def get_boards(db: Session = Depends(get_db)):
+def get_boards(db: DBSession = Depends(get_db)):
     """Get all boards"""
     return db.query(Board).order_by(Board.created_at.desc()).all()
 
 
 @app.post("/api/boards", response_model=BoardResponse, status_code=status.HTTP_201_CREATED)
-def create_board(board: BoardCreate, db: Session = Depends(get_db)):
+def create_board(board: BoardCreate, db: DBSession = Depends(get_db)):
     """Create a new board"""
     db_board = Board(**board.model_dump())
     db.add(db_board)
@@ -64,7 +164,7 @@ def create_board(board: BoardCreate, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/boards/{board_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_board(board_id: int, db: Session = Depends(get_db)):
+def delete_board(board_id: int, db: DBSession = Depends(get_db)):
     """Delete a board"""
     db_board = db.query(Board).filter(Board.id == board_id).first()
     if not db_board:
@@ -84,7 +184,7 @@ def get_tasks(
     label_id: Optional[int] = Query(None),
     search: Optional[str] = Query(None),
     include_archived: bool = Query(False),
-    db: Session = Depends(get_db)
+    db: DBSession = Depends(get_db)
 ):
     """Get all tasks with optional filters"""
     query = db.query(Task)
@@ -113,7 +213,7 @@ def get_tasks(
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
-def get_task(task_id: int, db: Session = Depends(get_db)):
+def get_task(task_id: int, db: DBSession = Depends(get_db)):
     """Get a single task with all details"""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
@@ -122,7 +222,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
-def create_task(task: TaskCreate, db: Session = Depends(get_db)):
+def create_task(task: TaskCreate, db: DBSession = Depends(get_db)):
     """Create a new task"""
     if not task.title.strip():
         raise HTTPException(status_code=422, detail="Title cannot be empty")
@@ -148,7 +248,7 @@ def create_task(task: TaskCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/api/tasks/{task_id}", response_model=TaskResponse)
-def update_task(task_id: int, task: TaskUpdate, db: Session = Depends(get_db)):
+def update_task(task_id: int, task: TaskUpdate, db: DBSession = Depends(get_db)):
     """Update an existing task"""
     db_task = db.query(Task).filter(Task.id == task_id).first()
     if not db_task:
@@ -178,7 +278,7 @@ def update_task(task_id: int, task: TaskUpdate, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(task_id: int, db: Session = Depends(get_db)):
+def delete_task(task_id: int, db: DBSession = Depends(get_db)):
     """Delete a task"""
     db_task = db.query(Task).filter(Task.id == task_id).first()
     if not db_task:
@@ -190,7 +290,7 @@ def delete_task(task_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/tasks/{task_id}/archive", response_model=TaskResponse)
-def archive_task(task_id: int, db: Session = Depends(get_db)):
+def archive_task(task_id: int, db: DBSession = Depends(get_db)):
     """Archive a task"""
     db_task = db.query(Task).filter(Task.id == task_id).first()
     if not db_task:
@@ -205,7 +305,7 @@ def archive_task(task_id: int, db: Session = Depends(get_db)):
 # ==================== SUBTASK ENDPOINTS ====================
 
 @app.post("/api/subtasks", response_model=SubtaskResponse, status_code=status.HTTP_201_CREATED)
-def create_subtask(subtask: SubtaskCreate, db: Session = Depends(get_db)):
+def create_subtask(subtask: SubtaskCreate, db: DBSession = Depends(get_db)):
     """Create a new subtask"""
     task = db.query(Task).filter(Task.id == subtask.task_id).first()
     if not task:
@@ -219,7 +319,7 @@ def create_subtask(subtask: SubtaskCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/api/subtasks/{subtask_id}", response_model=SubtaskResponse)
-def update_subtask(subtask_id: int, subtask: SubtaskUpdate, db: Session = Depends(get_db)):
+def update_subtask(subtask_id: int, subtask: SubtaskUpdate, db: DBSession = Depends(get_db)):
     """Update a subtask"""
     db_subtask = db.query(Subtask).filter(Subtask.id == subtask_id).first()
     if not db_subtask:
@@ -235,7 +335,7 @@ def update_subtask(subtask_id: int, subtask: SubtaskUpdate, db: Session = Depend
 
 
 @app.delete("/api/subtasks/{subtask_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_subtask(subtask_id: int, db: Session = Depends(get_db)):
+def delete_subtask(subtask_id: int, db: DBSession = Depends(get_db)):
     """Delete a subtask"""
     db_subtask = db.query(Subtask).filter(Subtask.id == subtask_id).first()
     if not db_subtask:
@@ -249,7 +349,7 @@ def delete_subtask(subtask_id: int, db: Session = Depends(get_db)):
 # ==================== COMMENT ENDPOINTS ====================
 
 @app.post("/api/comments", response_model=CommentResponse, status_code=status.HTTP_201_CREATED)
-def create_comment(comment: CommentCreate, db: Session = Depends(get_db)):
+def create_comment(comment: CommentCreate, db: DBSession = Depends(get_db)):
     """Create a new comment"""
     task = db.query(Task).filter(Task.id == comment.task_id).first()
     if not task:
@@ -263,7 +363,7 @@ def create_comment(comment: CommentCreate, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/comments/{comment_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_comment(comment_id: int, db: Session = Depends(get_db)):
+def delete_comment(comment_id: int, db: DBSession = Depends(get_db)):
     """Delete a comment"""
     db_comment = db.query(Comment).filter(Comment.id == comment_id).first()
     if not db_comment:
@@ -277,13 +377,13 @@ def delete_comment(comment_id: int, db: Session = Depends(get_db)):
 # ==================== LABEL ENDPOINTS ====================
 
 @app.get("/api/labels", response_model=list[LabelResponse])
-def get_labels(db: Session = Depends(get_db)):
+def get_labels(db: DBSession = Depends(get_db)):
     """Get all labels"""
     return db.query(Label).order_by(Label.name).all()
 
 
 @app.post("/api/labels", response_model=LabelResponse, status_code=status.HTTP_201_CREATED)
-def create_label(label: LabelCreate, db: Session = Depends(get_db)):
+def create_label(label: LabelCreate, db: DBSession = Depends(get_db)):
     """Create a new label"""
     db_label = Label(**label.model_dump())
     db.add(db_label)
@@ -293,7 +393,7 @@ def create_label(label: LabelCreate, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/labels/{label_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_label(label_id: int, db: Session = Depends(get_db)):
+def delete_label(label_id: int, db: DBSession = Depends(get_db)):
     """Delete a label"""
     db_label = db.query(Label).filter(Label.id == label_id).first()
     if not db_label:
@@ -307,13 +407,13 @@ def delete_label(label_id: int, db: Session = Depends(get_db)):
 # ==================== PROJECT ENDPOINTS ====================
 
 @app.get("/api/projects", response_model=list[ProjectResponse])
-def get_projects(db: Session = Depends(get_db)):
+def get_projects(db: DBSession = Depends(get_db)):
     """Get all projects"""
     return db.query(Project).order_by(Project.created_at.desc()).all()
 
 
 @app.post("/api/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
-def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
+def create_project(project: ProjectCreate, db: DBSession = Depends(get_db)):
     """Create a new project"""
     db_project = Project(**project.model_dump())
     db.add(db_project)
@@ -323,7 +423,7 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_project(project_id: int, db: Session = Depends(get_db)):
+def delete_project(project_id: int, db: DBSession = Depends(get_db)):
     """Delete a project and all its tasks"""
     db_project = db.query(Project).filter(Project.id == project_id).first()
     if not db_project:
@@ -337,7 +437,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 # ==================== STATISTICS ENDPOINTS ====================
 
 @app.get("/api/statistics", response_model=TaskStatistics)
-def get_statistics(db: Session = Depends(get_db)):
+def get_statistics(db: DBSession = Depends(get_db)):
     """Get task statistics"""
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
@@ -398,7 +498,7 @@ def get_statistics(db: Session = Depends(get_db)):
 # ==================== EXPORT ENDPOINTS ====================
 
 @app.get("/api/export/json")
-def export_json(db: Session = Depends(get_db)):
+def export_json(db: DBSession = Depends(get_db)):
     """Export all data as JSON"""
     tasks = db.query(Task).all()
     projects = db.query(Project).all()
@@ -431,7 +531,7 @@ def export_json(db: Session = Depends(get_db)):
 
 
 @app.get("/api/export/csv")
-def export_csv(db: Session = Depends(get_db)):
+def export_csv(db: DBSession = Depends(get_db)):
     """Export tasks as CSV"""
     tasks = db.query(Task).all()
     

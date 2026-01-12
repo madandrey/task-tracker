@@ -1,7 +1,39 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, EmailStr
 from datetime import datetime
 from typing import Optional
 from app.models import TaskStatus, TaskPriority
+
+
+# ==================== User Schemas ====================
+class UserBase(BaseModel):
+    email: str
+    username: str
+    full_name: str = ""
+
+
+class UserCreate(UserBase):
+    password: str
+
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(UserBase):
+    id: int
+    avatar_color: str
+    is_active: bool
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserPublic(BaseModel):
+    id: int
+    username: str
+    full_name: str
+    avatar_color: str
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ==================== Board Schemas ====================

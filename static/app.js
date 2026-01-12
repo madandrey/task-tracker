@@ -1,10 +1,11 @@
 /**
  * TaskFlow - Professional Task Tracker
- * Main JavaScript Application (Production Version)
+ * Main JavaScript Application v3.0
  */
 
 // ==================== State Management ====================
 const state = {
+    user: null,
     tasks: [],
     projects: [],
     labels: [],
@@ -17,7 +18,9 @@ const state = {
     },
     currentView: 'board',
     editingTaskId: null,
-    theme: localStorage.getItem('theme') || 'dark'
+    theme: localStorage.getItem('theme') || 'light',
+    tempSubtasks: [],
+    tempComments: []
 };
 
 // ==================== API Service ====================
@@ -27,15 +30,27 @@ const API = {
     async request(endpoint, options = {}) {
         const response = await fetch(`${this.baseUrl}${endpoint}`, {
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             ...options
         });
+        
+        if (response.status === 401 && !endpoint.includes('/auth/')) {
+            // Not authenticated - continue as guest
+            return null;
+        }
+        
         if (!response.ok && response.status !== 204) {
             const error = await response.json().catch(() => ({ detail: 'Request failed' }));
             throw new Error(error.detail || 'Request failed');
         }
+        
         if (response.status === 204) return null;
         return response.json();
     },
+
+    // Auth
+    getMe: () => API.request('/auth/me'),
+    logout: () => API.request('/auth/logout', { method: 'POST' }),
 
     // Tasks
     getTasks: (filters = {}) => {
@@ -49,7 +64,6 @@ const API = {
     createTask: (task) => API.request('/tasks', { method: 'POST', body: JSON.stringify(task) }),
     updateTask: (id, updates) => API.request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(updates) }),
     deleteTask: (id) => API.request(`/tasks/${id}`, { method: 'DELETE' }),
-    archiveTask: (id) => API.request(`/tasks/${id}/archive`, { method: 'POST' }),
 
     // Subtasks
     createSubtask: (subtask) => API.request('/subtasks', { method: 'POST', body: JSON.stringify(subtask) }),
@@ -82,193 +96,58 @@ const API = {
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
-const elements = {
-    // Containers
-    todoTasks: $('#todoTasks'),
-    inProgressTasks: $('#inProgressTasks'),
-    doneTasks: $('#doneTasks'),
-    statsGrid: $('#statsGrid'),
-    archiveList: $('#archiveList'),
-    
-    // Counts
-    todoCount: $('#todoCount'),
-    inProgressCount: $('#inProgressCount'),
-    doneCount: $('#doneCount'),
-    
-    // Task Modal
-    taskModal: $('#taskModal'),
-    taskForm: $('#taskForm'),
-    taskId: $('#taskId'),
-    taskTitle: $('#taskTitle'),
-    taskDescription: $('#taskDescription'),
-    taskPriority: $('#taskPriority'),
-    taskProject: $('#taskProject'),
-    taskDueDate: $('#taskDueDate'),
-    taskStatus: $('#taskStatus'),
-    taskStatusGroup: $('#taskStatusGroup'),
-    taskModalTitle: $('#taskModalTitle'),
-    labelsPicker: $('#labelsPicker'),
-    subtasksSection: $('#subtasksSection'),
-    subtasksList: $('#subtasksList'),
-    newSubtaskInput: $('#newSubtaskInput'),
-    commentsSection: $('#commentsSection'),
-    commentsList: $('#commentsList'),
-    newCommentInput: $('#newCommentInput'),
-    
-    // Project Modal
-    projectModal: $('#projectModal'),
-    projectForm: $('#projectForm'),
-    projectName: $('#projectName'),
-    projectColor: $('#projectColor'),
-    
-    // Label Modal
-    labelModal: $('#labelModal'),
-    labelForm: $('#labelForm'),
-    labelName: $('#labelName'),
-    labelColor: $('#labelColor'),
-    
-    // Confirm Modal
-    confirmModal: $('#confirmModal'),
-    confirmTitle: $('#confirmTitle'),
-    confirmMessage: $('#confirmMessage'),
-    confirmOk: $('#confirmOk'),
-    confirmCancel: $('#confirmCancel'),
-    
-    // Navigation
-    projectsList: $('#projectsList'),
-    labelsList: $('#labelsList'),
-    filterChips: $('#filterChips'),
-    searchInput: $('#searchInput'),
-    pageTitle: $('#pageTitle'),
-    
-    // Views
-    boardView: $('#boardView'),
-    statisticsView: $('#statisticsView'),
-    archiveView: $('#archiveView'),
-    
-    // Theme
-    themeToggle: $('#themeToggle'),
-    
-    // Other
-    toastContainer: $('#toastContainer'),
-    loadingOverlay: $('#loadingOverlay'),
-    sidebar: $('.sidebar'),
-    mobileMenuBtn: $('#mobileMenuBtn')
-};
-
-// ==================== Utility Functions ====================
-const escapeHtml = (text) => {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-};
-
-const capitalize = (str) => str.charAt(0).toUpperCase() + str.slice(1).replace('_', ' ');
-
-const formatDate = (dateStr) => {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-};
-
-const formatDateTime = (dateStr) => {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    return date.toLocaleString('en-US', { 
-        month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
-    });
-};
-
-const isOverdue = (dueDate) => {
-    if (!dueDate) return false;
-    return new Date(dueDate) < new Date();
-};
-
-const isToday = (dueDate) => {
-    if (!dueDate) return false;
-    const due = new Date(dueDate);
-    const today = new Date();
-    return due.toDateString() === today.toDateString();
-};
-
-const debounce = (fn, delay) => {
-    let timeout;
-    return (...args) => {
-        clearTimeout(timeout);
-        timeout = setTimeout(() => fn(...args), delay);
-    };
-};
-
-// ==================== Toast Notifications ====================
-function showToast(message, type = 'info') {
-    const icons = { success: '✅', error: '❌', info: 'ℹ️' };
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `
-        <span class="toast-icon">${icons[type]}</span>
-        <span class="toast-message">${escapeHtml(message)}</span>
-        <button class="toast-close" onclick="this.parentElement.remove()">×</button>
-    `;
-    elements.toastContainer.appendChild(toast);
-    setTimeout(() => toast.remove(), 4000);
-}
-
-// ==================== Loading State ====================
-function showLoading() {
-    elements.loadingOverlay.classList.add('active');
-}
-
-function hideLoading() {
-    elements.loadingOverlay.classList.remove('active');
-}
-
-// ==================== Confirm Dialog ====================
-function showConfirm(title, message) {
-    return new Promise((resolve) => {
-        elements.confirmTitle.textContent = title;
-        elements.confirmMessage.textContent = message;
-        elements.confirmModal.classList.add('active');
-        
-        const handleOk = () => {
-            cleanup();
-            resolve(true);
-        };
-        
-        const handleCancel = () => {
-            cleanup();
-            resolve(false);
-        };
-        
-        const cleanup = () => {
-            elements.confirmModal.classList.remove('active');
-            elements.confirmOk.removeEventListener('click', handleOk);
-            elements.confirmCancel.removeEventListener('click', handleCancel);
-        };
-        
-        elements.confirmOk.addEventListener('click', handleOk);
-        elements.confirmCancel.addEventListener('click', handleCancel);
-    });
-}
-
-// ==================== Theme Management ====================
+// ==================== Theme ====================
 function initTheme() {
-    document.body.setAttribute('data-theme', state.theme);
+    document.documentElement.setAttribute('data-theme', state.theme);
     updateThemeIcon();
 }
 
 function toggleTheme() {
-    state.theme = state.theme === 'dark' ? 'light' : 'dark';
-    document.body.setAttribute('data-theme', state.theme);
+    state.theme = state.theme === 'light' ? 'dark' : 'light';
     localStorage.setItem('theme', state.theme);
+    document.documentElement.setAttribute('data-theme', state.theme);
     updateThemeIcon();
 }
 
 function updateThemeIcon() {
-    const icon = state.theme === 'dark' ? '🌙' : '☀️';
-    elements.themeToggle.querySelector('.theme-icon').textContent = icon;
+    const btn = $('#themeToggle');
+    if (btn) btn.textContent = state.theme === 'light' ? '🌙' : '☀️';
 }
 
-// ==================== View Navigation ====================
+// ==================== Loading ====================
+function showLoading() {
+    const overlay = $('#loadingOverlay');
+    if (overlay) overlay.classList.add('active');
+}
+
+function hideLoading() {
+    const overlay = $('#loadingOverlay');
+    if (overlay) overlay.classList.remove('active');
+}
+
+// ==================== Toast Notifications ====================
+function showToast(message, type = 'info') {
+    const container = $('#toastContainer');
+    if (!container) return;
+    
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+        <span>${message}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">×</button>
+    `;
+    container.appendChild(toast);
+    
+    setTimeout(() => toast.remove(), 4000);
+}
+
+// ==================== Sidebar ====================
+function toggleSidebar() {
+    const sidebar = $('#sidebar');
+    if (sidebar) sidebar.classList.toggle('open');
+}
+
+// ==================== View Switching ====================
 function switchView(view) {
     state.currentView = view;
     
@@ -283,86 +162,129 @@ function switchView(view) {
     
     // Update title
     const titles = { board: 'Board', statistics: 'Statistics', archive: 'Archive' };
-    elements.pageTitle.textContent = titles[view] || 'Board';
+    $('#viewTitle').textContent = titles[view] || 'Board';
     
     // Load view data
     if (view === 'statistics') loadStatistics();
-    else if (view === 'archive') loadArchive();
+    if (view === 'archive') loadArchive();
+    
+    // Close sidebar on mobile
+    $('#sidebar').classList.remove('open');
+}
+
+// ==================== Data Loading ====================
+async function loadTasks() {
+    const tasks = await API.getTasks(state.filters);
+    state.tasks = tasks || [];
+    renderTasks();
+}
+
+async function loadProjects() {
+    const projects = await API.getProjects();
+    state.projects = projects || [];
+    renderProjects();
+    updateProjectSelect();
+}
+
+async function loadLabels() {
+    const labels = await API.getLabels();
+    state.labels = labels || [];
+    renderLabels();
+}
+
+async function loadStatistics() {
+    const stats = await API.getStatistics();
+    if (stats) renderStatistics(stats);
+}
+
+async function loadArchive() {
+    const tasks = await API.getTasks({ is_archived: true });
+    renderArchive(tasks || []);
+}
+
+async function loadUser() {
+    const user = await API.getMe();
+    state.user = user;
+    renderUserInfo();
 }
 
 // ==================== Rendering ====================
 function renderTasks() {
-    const todoTasks = state.tasks.filter(t => t.status === 'todo');
-    const inProgressTasks = state.tasks.filter(t => t.status === 'in_progress');
-    const doneTasks = state.tasks.filter(t => t.status === 'done');
-
-    elements.todoTasks.innerHTML = todoTasks.length 
-        ? todoTasks.map(renderTaskCard).join('') 
-        : renderEmptyState('📝', 'No tasks to do');
+    const activeTasks = state.tasks.filter(t => !t.is_archived);
     
-    elements.inProgressTasks.innerHTML = inProgressTasks.length 
-        ? inProgressTasks.map(renderTaskCard).join('') 
-        : renderEmptyState('⚡', 'Nothing in progress');
+    const todoTasks = activeTasks.filter(t => t.status === 'todo');
+    const inProgressTasks = activeTasks.filter(t => t.status === 'in_progress');
+    const doneTasks = activeTasks.filter(t => t.status === 'done');
     
-    elements.doneTasks.innerHTML = doneTasks.length 
-        ? doneTasks.map(renderTaskCard).join('') 
-        : renderEmptyState('✨', 'Complete some tasks!');
-
-    elements.todoCount.textContent = todoTasks.length;
-    elements.inProgressCount.textContent = inProgressTasks.length;
-    elements.doneCount.textContent = doneTasks.length;
-
+    const todoContainer = $('#todoTasks');
+    const inProgressContainer = $('#inProgressTasks');
+    const doneContainer = $('#doneTasks');
+    
+    if (todoContainer) {
+        todoContainer.innerHTML = todoTasks.length 
+            ? todoTasks.map(renderTaskCard).join('')
+            : renderEmptyState('📝', 'No tasks to do');
+    }
+    
+    if (inProgressContainer) {
+        inProgressContainer.innerHTML = inProgressTasks.length 
+            ? inProgressTasks.map(renderTaskCard).join('')
+            : renderEmptyState('⚡', 'Nothing in progress');
+    }
+    
+    if (doneContainer) {
+        doneContainer.innerHTML = doneTasks.length 
+            ? doneTasks.map(renderTaskCard).join('')
+            : renderEmptyState('✨', 'Complete some tasks!');
+    }
+    
+    // Update counts
+    const todoCount = $('#todoCount');
+    const inProgressCount = $('#inProgressCount');
+    const doneCount = $('#doneCount');
+    
+    if (todoCount) todoCount.textContent = todoTasks.length;
+    if (inProgressCount) inProgressCount.textContent = inProgressTasks.length;
+    if (doneCount) doneCount.textContent = doneTasks.length;
+    
     attachDragListeners();
 }
 
 function renderTaskCard(task) {
-    const project = task.project;
-    const priorityEmoji = { urgent: '🚨', high: '🔴', medium: '🟡', low: '🟢' };
-    const overdue = isOverdue(task.due_date) && task.status !== 'done';
-    const today = isToday(task.due_date);
+    const priorityClasses = {
+        low: 'priority-low',
+        medium: 'priority-medium',
+        high: 'priority-high',
+        urgent: 'priority-urgent'
+    };
     
-    const subtaskTotal = task.subtasks?.length || 0;
-    const subtaskDone = task.subtasks?.filter(s => s.is_completed).length || 0;
-    const commentCount = task.comments?.length || 0;
-
-    const labelsHtml = (task.labels || []).map(l => `
-        <span class="task-label" style="background: ${l.color}20; color: ${l.color};">${escapeHtml(l.name)}</span>
-    `).join('');
-
+    const priorityLabels = {
+        low: '🟢 Low',
+        medium: '🟡 Medium',
+        high: '🔴 High',
+        urgent: '🚨 Urgent'
+    };
+    
+    const dueClass = task.due_date ? getDueDateClass(task.due_date) : '';
+    const subtaskProgress = task.subtasks?.length ? 
+        `${task.subtasks.filter(s => s.is_completed).length}/${task.subtasks.length}` : '';
+    
     return `
-        <div class="task-card ${overdue ? 'overdue' : ''}" draggable="true" data-task-id="${task.id}">
-            <div class="task-header">
-                <span class="task-title" onclick="editTask(${task.id})">${escapeHtml(task.title)}</span>
-                <div class="task-actions">
-                    <button class="task-action-btn" onclick="editTask(${task.id})" title="Edit">✏️</button>
-                    <button class="task-action-btn" onclick="archiveTaskAction(${task.id})" title="Archive">📦</button>
-                    <button class="task-action-btn delete" onclick="deleteTaskAction(${task.id})" title="Delete">🗑️</button>
+        <div class="task-card" draggable="true" data-task-id="${task.id}">
+            <div class="task-card-header">
+                <span class="task-card-title">${escapeHtml(task.title)}</span>
+                <div class="task-card-actions">
+                    <button class="task-card-action" onclick="editTask(${task.id})" title="Edit">✏️</button>
+                    <button class="task-card-action delete" onclick="confirmDelete('task', ${task.id})" title="Delete">🗑️</button>
                 </div>
             </div>
-            ${task.description ? `<p class="task-description">${escapeHtml(task.description)}</p>` : ''}
-            ${labelsHtml ? `<div class="task-labels">${labelsHtml}</div>` : ''}
-            <div class="task-meta">
-                <div class="task-meta-left">
-                    <span class="task-priority ${task.priority}">
-                        ${priorityEmoji[task.priority]} ${capitalize(task.priority)}
-                    </span>
-                    ${task.due_date ? `
-                        <span class="task-due ${overdue ? 'overdue' : ''} ${today ? 'today' : ''}">
-                            📅 ${formatDate(task.due_date)}
-                        </span>
-                    ` : ''}
-                    ${subtaskTotal > 0 ? `
-                        <span class="task-subtasks">☑️ ${subtaskDone}/${subtaskTotal}</span>
-                    ` : ''}
-                    ${commentCount > 0 ? `
-                        <span class="task-subtasks">💬 ${commentCount}</span>
-                    ` : ''}
-                </div>
-                ${project ? `
-                    <span class="task-project" style="color: ${project.color}; border-color: ${project.color}30; background: ${project.color}15;">
-                        ${escapeHtml(project.name)}
-                    </span>
-                ` : ''}
+            ${task.description ? `<p class="task-card-description">${escapeHtml(task.description)}</p>` : ''}
+            <div class="task-card-meta">
+                <span class="task-badge ${priorityClasses[task.priority]}">${priorityLabels[task.priority]}</span>
+                ${task.labels?.map(l => `<span class="task-label" style="background:${l.color}20;color:${l.color}">${escapeHtml(l.name)}</span>`).join('') || ''}
+                ${task.due_date ? `<span class="task-due ${dueClass}">📅 ${formatDate(task.due_date)}</span>` : ''}
+                ${subtaskProgress ? `<span class="task-progress"><div class="task-progress-bar"><div class="task-progress-fill" style="width:${(task.subtasks.filter(s=>s.is_completed).length/task.subtasks.length)*100}%"></div></div>${subtaskProgress}</span>` : ''}
+                ${task.project ? `<span class="task-project">${escapeHtml(task.project.name)}</span>` : ''}
             </div>
         </div>
     `;
@@ -378,170 +300,161 @@ function renderEmptyState(icon, text) {
 }
 
 function renderProjects() {
-    elements.projectsList.innerHTML = state.projects.map(p => `
-        <div class="project-nav-item" onclick="filterByProject(${p.id})">
-            <div class="project-info">
-                <div class="project-dot" style="background: ${p.color}"></div>
-                <span class="project-name">${escapeHtml(p.name)}</span>
-            </div>
-            <button class="delete-btn-small" onclick="event.stopPropagation(); deleteProjectAction(${p.id})" title="Delete">×</button>
+    const container = $('#projectsList');
+    if (!container) return;
+    
+    container.innerHTML = state.projects.map(p => `
+        <div class="sidebar-item ${state.filters.project_id === p.id ? 'active' : ''}" onclick="filterByProject(${p.id})">
+            <span class="sidebar-item-dot" style="background:${p.color}"></span>
+            <span>${escapeHtml(p.name)}</span>
+            <button class="sidebar-item-delete" onclick="event.stopPropagation();confirmDelete('project',${p.id})">×</button>
         </div>
-    `).join('') || '<p style="color: var(--text-muted); padding: 8px 12px; font-size: 13px;">No projects</p>';
-
-    // Update project select
-    const projectOptions = `<option value="">No Project</option>` + 
-        state.projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
-    elements.taskProject.innerHTML = projectOptions;
+    `).join('');
 }
 
 function renderLabels() {
-    elements.labelsList.innerHTML = state.labels.map(l => `
-        <div class="label-nav-item" onclick="filterByLabel(${l.id})">
-            <div class="label-info">
-                <div class="label-dot" style="background: ${l.color}"></div>
-                <span class="label-name">${escapeHtml(l.name)}</span>
-            </div>
-            <button class="delete-btn-small" onclick="event.stopPropagation(); deleteLabelAction(${l.id})" title="Delete">×</button>
+    const container = $('#labelsList');
+    if (!container) return;
+    
+    container.innerHTML = state.labels.map(l => `
+        <div class="sidebar-item ${state.filters.label_id === l.id ? 'active' : ''}" onclick="filterByLabel(${l.id})">
+            <span class="sidebar-item-dot" style="background:${l.color}"></span>
+            <span>${escapeHtml(l.name)}</span>
+            <button class="sidebar-item-delete" onclick="event.stopPropagation();confirmDelete('label',${l.id})">×</button>
         </div>
-    `).join('') || '<p style="color: var(--text-muted); padding: 8px 12px; font-size: 13px;">No labels</p>';
-
-    renderLabelsPicker();
+    `).join('');
 }
 
 function renderLabelsPicker(selectedIds = []) {
-    elements.labelsPicker.innerHTML = state.labels.map(l => `
+    const container = $('#labelsPicker');
+    if (!container) return;
+    
+    container.innerHTML = state.labels.map(l => `
         <div class="label-option ${selectedIds.includes(l.id) ? 'selected' : ''}" 
-             style="background: ${l.color}20; color: ${l.color};"
+             style="background:${l.color}20;color:${l.color}"
              data-label-id="${l.id}"
-             onclick="toggleLabelSelection(${l.id})">
+             onclick="toggleLabelSelection(this, ${l.id})">
             ${escapeHtml(l.name)}
         </div>
-    `).join('') || '<p style="color: var(--text-muted); font-size: 13px;">No labels available</p>';
+    `).join('');
 }
 
-function renderFilterChips() {
-    const chips = [];
+function renderStatistics(stats) {
+    const container = $('#statsGrid');
+    if (!container) return;
     
-    if (state.filters.project_id) {
-        const project = state.projects.find(p => p.id === parseInt(state.filters.project_id));
-        if (project) {
-            chips.push(`<div class="filter-chip">📁 ${escapeHtml(project.name)} <button class="remove-chip" onclick="clearFilter('project_id')">×</button></div>`);
-        }
-    }
-    
-    if (state.filters.label_id) {
-        const label = state.labels.find(l => l.id === parseInt(state.filters.label_id));
-        if (label) {
-            chips.push(`<div class="filter-chip">🏷️ ${escapeHtml(label.name)} <button class="remove-chip" onclick="clearFilter('label_id')">×</button></div>`);
-        }
-    }
-    
-    if (state.filters.search) {
-        chips.push(`<div class="filter-chip">🔍 "${escapeHtml(state.filters.search)}" <button class="remove-chip" onclick="clearFilter('search')">×</button></div>`);
-    }
-    
-    elements.filterChips.innerHTML = chips.join('');
-}
-
-function renderStatistics() {
-    const stats = state.statistics;
-    if (!stats) return;
-    
-    elements.statsGrid.innerHTML = `
+    container.innerHTML = `
         <div class="stat-card">
             <div class="stat-card-header">
-                <span class="stat-card-title">Total Tasks</span>
-                <span class="stat-card-icon">📊</span>
+                <div class="stat-card-icon blue">📋</div>
             </div>
-            <div class="stat-card-value">${stats.total_tasks}</div>
-            <div class="stat-card-subtitle">${stats.overdue_count} overdue</div>
+            <div class="stat-card-value">${stats.total_tasks || 0}</div>
+            <div class="stat-card-label">Total Tasks</div>
         </div>
-        
         <div class="stat-card">
             <div class="stat-card-header">
-                <span class="stat-card-title">Completion Rate</span>
-                <span class="stat-card-icon">✅</span>
+                <div class="stat-card-icon green">✅</div>
             </div>
-            <div class="stat-card-value">${stats.completion_rate}%</div>
-            <div class="stat-bar">
-                <div class="stat-bar-fill" style="width: ${stats.completion_rate}%; background: var(--status-done);"></div>
-            </div>
+            <div class="stat-card-value">${stats.completed_tasks || 0}</div>
+            <div class="stat-card-label">Completed</div>
         </div>
-        
         <div class="stat-card">
             <div class="stat-card-header">
-                <span class="stat-card-title">Completed This Week</span>
-                <span class="stat-card-icon">🏆</span>
+                <div class="stat-card-icon purple">⏳</div>
             </div>
-            <div class="stat-card-value">${stats.completed_this_week}</div>
-            <div class="stat-card-subtitle">tasks completed</div>
+            <div class="stat-card-value">${stats.in_progress_tasks || 0}</div>
+            <div class="stat-card-label">In Progress</div>
         </div>
-        
         <div class="stat-card">
             <div class="stat-card-header">
-                <span class="stat-card-title">Status Overview</span>
-                <span class="stat-card-icon">📈</span>
+                <div class="stat-card-icon orange">📁</div>
             </div>
-            <div class="stat-list">
-                <div class="stat-list-item">
-                    <span class="stat-list-label"><span class="status-dot todo"></span> To Do</span>
-                    <span class="stat-list-value">${stats.todo_count}</span>
-                </div>
-                <div class="stat-list-item">
-                    <span class="stat-list-label"><span class="status-dot in-progress"></span> In Progress</span>
-                    <span class="stat-list-value">${stats.in_progress_count}</span>
-                </div>
-                <div class="stat-list-item">
-                    <span class="stat-list-label"><span class="status-dot done"></span> Done</span>
-                    <span class="stat-list-value">${stats.done_count}</span>
-                </div>
-            </div>
-        </div>
-        
-        <div class="stat-card">
-            <div class="stat-card-header">
-                <span class="stat-card-title">By Priority</span>
-                <span class="stat-card-icon">🎯</span>
-            </div>
-            <div class="stat-list">
-                ${Object.entries(stats.tasks_by_priority).map(([priority, count]) => `
-                    <div class="stat-list-item">
-                        <span class="stat-list-label">${capitalize(priority)}</span>
-                        <span class="stat-list-value">${count}</span>
-                    </div>
-                `).join('')}
-            </div>
-        </div>
-        
-        <div class="stat-card">
-            <div class="stat-card-header">
-                <span class="stat-card-title">By Project</span>
-                <span class="stat-card-icon">📁</span>
-            </div>
-            <div class="stat-list">
-                ${Object.entries(stats.tasks_by_project).map(([project, count]) => `
-                    <div class="stat-list-item">
-                        <span class="stat-list-label">${escapeHtml(project)}</span>
-                        <span class="stat-list-value">${count}</span>
-                    </div>
-                `).join('')}
-            </div>
+            <div class="stat-card-value">${stats.total_projects || 0}</div>
+            <div class="stat-card-label">Projects</div>
         </div>
     `;
 }
 
-function renderArchive() {
-    const archived = state.tasks.filter(t => t.status === 'archived');
+function renderArchive(tasks) {
+    const container = $('#archiveList');
+    if (!container) return;
     
-    elements.archiveList.innerHTML = archived.length ? archived.map(t => `
+    container.innerHTML = tasks.length ? tasks.map(t => `
         <div class="archive-item">
             <div class="archive-item-info">
                 <span class="archive-item-title">${escapeHtml(t.title)}</span>
-                <span class="archive-item-date">Archived ${formatDate(t.updated_at)}</span>
+                <span class="archive-item-date">Completed ${formatDate(t.completed_at || t.updated_at)}</span>
             </div>
-            <button class="btn btn-ghost btn-sm" onclick="deleteTaskAction(${t.id})">Delete</button>
+            <div class="archive-item-actions">
+                <button class="btn btn-secondary btn-sm" onclick="restoreTask(${t.id})">Restore</button>
+                <button class="btn btn-ghost btn-sm" onclick="confirmDelete('task',${t.id})">Delete</button>
+            </div>
         </div>
     `).join('') : renderEmptyState('📦', 'No archived tasks');
+}
+
+function renderUserInfo() {
+    const avatar = $('#userAvatar');
+    const name = $('#userName');
+    const email = $('#userEmail');
+    
+    if (state.user) {
+        if (avatar) {
+            avatar.style.background = state.user.avatar_color;
+            avatar.textContent = (state.user.full_name || state.user.username || 'U')[0].toUpperCase();
+        }
+        if (name) name.textContent = state.user.full_name || state.user.username;
+        if (email) email.textContent = state.user.email;
+    } else {
+        if (avatar) avatar.textContent = 'G';
+        if (name) name.textContent = 'Guest';
+        if (email) email.innerHTML = '<a href="/login" style="color:inherit">Sign in to sync</a>';
+    }
+}
+
+function updateProjectSelect() {
+    const select = $('#taskProject');
+    if (!select) return;
+    
+    select.innerHTML = '<option value="">No Project</option>' + 
+        state.projects.map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('');
+}
+
+function renderFilterChips() {
+    const container = $('#filterChips');
+    if (!container) return;
+    
+    let chips = '';
+    
+    if (state.filters.project_id) {
+        const project = state.projects.find(p => p.id === state.filters.project_id);
+        if (project) {
+            chips += `<div class="filter-chip">
+                <span style="width:8px;height:8px;background:${project.color};border-radius:50%"></span>
+                ${escapeHtml(project.name)}
+                <button class="filter-chip-remove" onclick="clearFilter('project_id')">×</button>
+            </div>`;
+        }
+    }
+    
+    if (state.filters.label_id) {
+        const label = state.labels.find(l => l.id === state.filters.label_id);
+        if (label) {
+            chips += `<div class="filter-chip">
+                ${escapeHtml(label.name)}
+                <button class="filter-chip-remove" onclick="clearFilter('label_id')">×</button>
+            </div>`;
+        }
+    }
+    
+    if (state.filters.search) {
+        chips += `<div class="filter-chip">
+            Search: ${escapeHtml(state.filters.search)}
+            <button class="filter-chip-remove" onclick="clearFilter('search')">×</button>
+        </div>`;
+    }
+    
+    container.innerHTML = chips;
 }
 
 // ==================== Drag and Drop ====================
@@ -550,11 +463,10 @@ function attachDragListeners() {
         card.addEventListener('dragstart', handleDragStart);
         card.addEventListener('dragend', handleDragEnd);
     });
-
-    $$('.tasks-container').forEach(container => {
-        container.addEventListener('dragover', handleDragOver);
-        container.addEventListener('dragleave', handleDragLeave);
-        container.addEventListener('drop', handleDrop);
+    
+    $$('.column-tasks').forEach(col => {
+        col.addEventListener('dragover', handleDragOver);
+        col.addEventListener('drop', handleDrop);
     });
 }
 
@@ -565,395 +477,396 @@ function handleDragStart(e) {
 
 function handleDragEnd(e) {
     e.target.classList.remove('dragging');
-    $$('.tasks-container').forEach(c => c.classList.remove('drag-over'));
 }
 
 function handleDragOver(e) {
     e.preventDefault();
-    e.currentTarget.classList.add('drag-over');
-}
-
-function handleDragLeave(e) {
-    e.currentTarget.classList.remove('drag-over');
 }
 
 async function handleDrop(e) {
     e.preventDefault();
-    e.currentTarget.classList.remove('drag-over');
-    
-    const taskId = e.dataTransfer.getData('text/plain');
+    const taskId = parseInt(e.dataTransfer.getData('text/plain'));
     const newStatus = e.currentTarget.closest('.column').dataset.status;
     
     await API.updateTask(taskId, { status: newStatus });
-    showToast('Task moved successfully', 'success');
     await loadTasks();
+    showToast('Task moved', 'success');
 }
 
-// ==================== Modal Handlers ====================
+// ==================== Filters ====================
+function filterByProject(projectId) {
+    state.filters.project_id = state.filters.project_id === projectId ? null : projectId;
+    loadTasks();
+    renderProjects();
+    renderFilterChips();
+}
+
+function filterByLabel(labelId) {
+    state.filters.label_id = state.filters.label_id === labelId ? null : labelId;
+    loadTasks();
+    renderLabels();
+    renderFilterChips();
+}
+
+function clearFilter(key) {
+    state.filters[key] = key === 'search' ? '' : null;
+    if (key === 'search') $('#searchInput').value = '';
+    loadTasks();
+    renderProjects();
+    renderLabels();
+    renderFilterChips();
+}
+
+// ==================== Task Modal ====================
 function openTaskModal(task = null) {
     state.editingTaskId = task?.id || null;
+    state.tempSubtasks = task?.subtasks ? [...task.subtasks] : [];
+    state.tempComments = task?.comments ? [...task.comments] : [];
     
-    elements.taskModalTitle.textContent = task ? 'Edit Task' : 'New Task';
-    elements.taskId.value = task?.id || '';
-    elements.taskTitle.value = task?.title || '';
-    elements.taskDescription.value = task?.description || '';
-    elements.taskPriority.value = task?.priority || 'medium';
-    elements.taskProject.value = task?.project_id || '';
-    elements.taskStatus.value = task?.status || 'todo';
+    $('#taskModalTitle').textContent = task ? 'Edit Task' : 'New Task';
+    $('#taskId').value = task?.id || '';
+    $('#taskTitle').value = task?.title || '';
+    $('#taskDescription').value = task?.description || '';
+    $('#taskPriority').value = task?.priority || 'medium';
+    $('#taskProject').value = task?.project_id || '';
+    $('#taskDueDate').value = task?.due_date ? task.due_date.split('T')[0] : '';
+    $('#taskStatus').value = task?.status || 'todo';
     
-    // Due date
-    if (task?.due_date) {
-        const date = new Date(task.due_date);
-        elements.taskDueDate.value = date.toISOString().slice(0, 16);
-    } else {
-        elements.taskDueDate.value = '';
-    }
+    $('#taskStatusGroup').style.display = task ? 'block' : 'none';
     
-    // Show/hide edit-only sections
-    elements.taskStatusGroup.style.display = task ? 'block' : 'none';
-    elements.subtasksSection.style.display = task ? 'block' : 'none';
-    elements.commentsSection.style.display = task ? 'block' : 'none';
+    renderLabelsPicker(task?.labels?.map(l => l.id) || []);
+    renderSubtasks();
+    renderComments();
     
-    // Labels
-    const selectedLabelIds = (task?.labels || []).map(l => l.id);
-    renderLabelsPicker(selectedLabelIds);
-    
-    // Subtasks
-    if (task) {
-        renderSubtasks(task.subtasks || []);
-        renderComments(task.comments || []);
-    }
-    
-    elements.taskModal.classList.add('active');
-    elements.taskTitle.focus();
+    $('#taskModal').classList.add('active');
+    $('#taskTitle').focus();
 }
 
 function closeTaskModal() {
-    elements.taskModal.classList.remove('active');
-    elements.taskForm.reset();
+    $('#taskModal').classList.remove('active');
+    $('#taskForm').reset();
     state.editingTaskId = null;
+    state.tempSubtasks = [];
+    state.tempComments = [];
 }
 
-function renderSubtasks(subtasks) {
-    elements.subtasksList.innerHTML = subtasks.map(s => `
-        <div class="subtask-item" data-subtask-id="${s.id}">
-            <input type="checkbox" class="subtask-checkbox" ${s.is_completed ? 'checked' : ''} 
-                   onchange="toggleSubtask(${s.id}, this.checked)">
-            <span class="subtask-title ${s.is_completed ? 'completed' : ''}">${escapeHtml(s.title)}</span>
-            <button class="delete-btn-small" onclick="deleteSubtaskAction(${s.id})">×</button>
-        </div>
-    `).join('');
-}
-
-function renderComments(comments) {
-    elements.commentsList.innerHTML = comments.map(c => `
-        <div class="comment-item" data-comment-id="${c.id}">
-            <div class="comment-content">${escapeHtml(c.content)}</div>
-            <div class="comment-meta">
-                <span class="comment-date">${formatDateTime(c.created_at)}</span>
-                <button class="delete-btn-small" onclick="deleteCommentAction(${c.id})">×</button>
-            </div>
-        </div>
-    `).join('') || '<p style="color: var(--text-muted); font-size: 13px;">No comments yet</p>';
-}
-
-// ==================== Task Actions ====================
-async function loadTasks() {
-    state.tasks = await API.getTasks({ ...state.filters, include_archived: state.currentView === 'archive' });
-    renderTasks();
-    renderFilterChips();
+async function editTask(id) {
+    const task = await API.getTask(id);
+    openTaskModal(task);
 }
 
 async function handleTaskSubmit(e) {
     e.preventDefault();
     
-    const selectedLabels = [...$$('.label-option.selected')].map(el => parseInt(el.dataset.labelId));
+    const selectedLabels = [...$$('#labelsPicker .label-option.selected')]
+        .map(el => parseInt(el.dataset.labelId));
     
     const taskData = {
-        title: elements.taskTitle.value.trim(),
-        description: elements.taskDescription.value.trim(),
-        priority: elements.taskPriority.value,
-        project_id: elements.taskProject.value ? parseInt(elements.taskProject.value) : null,
-        due_date: elements.taskDueDate.value || null,
+        title: $('#taskTitle').value.trim(),
+        description: $('#taskDescription').value.trim(),
+        priority: $('#taskPriority').value,
+        project_id: $('#taskProject').value ? parseInt($('#taskProject').value) : null,
+        due_date: $('#taskDueDate').value || null,
+        status: $('#taskStatus').value,
         label_ids: selectedLabels
     };
     
     if (state.editingTaskId) {
-        taskData.status = elements.taskStatus.value;
         await API.updateTask(state.editingTaskId, taskData);
-        showToast('Task updated successfully', 'success');
+        showToast('Task updated', 'success');
     } else {
-        await API.createTask(taskData);
-        showToast('Task created successfully', 'success');
+        const newTask = await API.createTask(taskData);
+        
+        // Create subtasks and comments for new task
+        for (const st of state.tempSubtasks) {
+            await API.createSubtask({ task_id: newTask.id, title: st.title });
+        }
+        for (const c of state.tempComments) {
+            await API.createComment({ task_id: newTask.id, content: c.content });
+        }
+        
+        showToast('Task created', 'success');
     }
     
     closeTaskModal();
     await loadTasks();
 }
 
-window.editTask = async function(id) {
-    const task = await API.getTask(id);
-    openTaskModal(task);
-};
-
-window.deleteTaskAction = async function(id) {
-    const confirmed = await showConfirm('Delete Task', 'Are you sure you want to delete this task?');
-    if (confirmed) {
-        await API.deleteTask(id);
-        showToast('Task deleted', 'success');
-        await loadTasks();
-    }
-};
-
-window.archiveTaskAction = async function(id) {
-    await API.archiveTask(id);
-    showToast('Task archived', 'success');
-    await loadTasks();
-};
-
-window.toggleLabelSelection = function(labelId) {
-    const el = $(`.label-option[data-label-id="${labelId}"]`);
+function toggleLabelSelection(el, labelId) {
     el.classList.toggle('selected');
-};
-
-// ==================== Subtask Actions ====================
-async function addSubtask() {
-    const title = elements.newSubtaskInput.value.trim();
-    if (!title || !state.editingTaskId) return;
-    
-    await API.createSubtask({ title, task_id: state.editingTaskId });
-    elements.newSubtaskInput.value = '';
-    
-    const task = await API.getTask(state.editingTaskId);
-    renderSubtasks(task.subtasks);
 }
 
-window.toggleSubtask = async function(id, completed) {
-    await API.updateSubtask(id, { is_completed: completed });
-    if (state.editingTaskId) {
-        const task = await API.getTask(state.editingTaskId);
-        renderSubtasks(task.subtasks);
-    }
-    await loadTasks();
-};
-
-window.deleteSubtaskAction = async function(id) {
-    await API.deleteSubtask(id);
-    if (state.editingTaskId) {
-        const task = await API.getTask(state.editingTaskId);
-        renderSubtasks(task.subtasks);
-    }
-};
-
-// ==================== Comment Actions ====================
-async function addComment() {
-    const content = elements.newCommentInput.value.trim();
-    if (!content || !state.editingTaskId) return;
+// ==================== Subtasks ====================
+function renderSubtasks() {
+    const container = $('#subtasksList');
+    if (!container) return;
     
-    await API.createComment({ content, task_id: state.editingTaskId });
-    elements.newCommentInput.value = '';
-    
-    const task = await API.getTask(state.editingTaskId);
-    renderComments(task.comments);
+    container.innerHTML = state.tempSubtasks.map((st, i) => `
+        <div class="subtask-item ${st.is_completed ? 'completed' : ''}">
+            <input type="checkbox" class="subtask-checkbox" 
+                   ${st.is_completed ? 'checked' : ''} 
+                   onchange="toggleSubtask(${i}, ${st.id || 'null'})">
+            <span class="subtask-title">${escapeHtml(st.title)}</span>
+            <button type="button" class="subtask-delete" onclick="deleteSubtask(${i}, ${st.id || 'null'})">×</button>
+        </div>
+    `).join('');
 }
 
-window.deleteCommentAction = async function(id) {
-    await API.deleteComment(id);
-    if (state.editingTaskId) {
-        const task = await API.getTask(state.editingTaskId);
-        renderComments(task.comments);
-    }
-};
-
-// ==================== Project Actions ====================
-async function loadProjects() {
-    state.projects = await API.getProjects();
-    renderProjects();
+function addSubtask() {
+    const input = $('#newSubtaskInput');
+    const title = input.value.trim();
+    if (!title) return;
+    
+    state.tempSubtasks.push({ title, is_completed: false });
+    input.value = '';
+    renderSubtasks();
 }
 
+async function toggleSubtask(index, dbId) {
+    state.tempSubtasks[index].is_completed = !state.tempSubtasks[index].is_completed;
+    
+    if (dbId && state.editingTaskId) {
+        await API.updateSubtask(dbId, { is_completed: state.tempSubtasks[index].is_completed });
+    }
+    
+    renderSubtasks();
+}
+
+async function deleteSubtask(index, dbId) {
+    if (dbId && state.editingTaskId) {
+        await API.deleteSubtask(dbId);
+    }
+    state.tempSubtasks.splice(index, 1);
+    renderSubtasks();
+}
+
+// ==================== Comments ====================
+function renderComments() {
+    const container = $('#commentsList');
+    if (!container) return;
+    
+    container.innerHTML = state.tempComments.map((c, i) => `
+        <div class="comment-item">
+            <div class="comment-header">
+                <span class="comment-author">${state.user?.username || 'Guest'}</span>
+                <span class="comment-time">${c.created_at ? formatDate(c.created_at) : 'Now'}</span>
+                <button type="button" class="comment-delete" onclick="deleteComment(${i}, ${c.id || 'null'})">×</button>
+            </div>
+            <p class="comment-content">${escapeHtml(c.content)}</p>
+        </div>
+    `).join('');
+}
+
+function addComment() {
+    const input = $('#newCommentInput');
+    const content = input.value.trim();
+    if (!content) return;
+    
+    state.tempComments.push({ content, created_at: new Date().toISOString() });
+    input.value = '';
+    renderComments();
+    
+    if (state.editingTaskId) {
+        API.createComment({ task_id: state.editingTaskId, content });
+    }
+}
+
+async function deleteComment(index, dbId) {
+    if (dbId && state.editingTaskId) {
+        await API.deleteComment(dbId);
+    }
+    state.tempComments.splice(index, 1);
+    renderComments();
+}
+
+// ==================== Projects ====================
 function openProjectModal() {
-    elements.projectModal.classList.add('active');
-    elements.projectName.focus();
+    $('#projectModal').classList.add('active');
+    $('#projectName').focus();
 }
 
 function closeProjectModal() {
-    elements.projectModal.classList.remove('active');
-    elements.projectForm.reset();
+    $('#projectModal').classList.remove('active');
+    $('#projectForm').reset();
 }
 
-async function handleProjectSubmit(e) {
+async function createProject(e) {
     e.preventDefault();
     
     await API.createProject({
-        name: elements.projectName.value.trim(),
-        color: elements.projectColor.value
+        name: $('#projectName').value.trim(),
+        color: $('#projectColor').value
     });
     
-    showToast('Project created', 'success');
     closeProjectModal();
     await loadProjects();
+    showToast('Project created', 'success');
 }
 
-window.deleteProjectAction = async function(id) {
-    const confirmed = await showConfirm('Delete Project', 'This will delete all tasks in this project. Continue?');
-    if (confirmed) {
-        await API.deleteProject(id);
-        showToast('Project deleted', 'success');
-        await loadProjects();
-        await loadTasks();
-    }
-};
-
-// ==================== Label Actions ====================
-async function loadLabels() {
-    state.labels = await API.getLabels();
-    renderLabels();
-}
-
+// ==================== Labels ====================
 function openLabelModal() {
-    elements.labelModal.classList.add('active');
-    elements.labelName.focus();
+    $('#labelModal').classList.add('active');
+    $('#labelName').focus();
 }
 
 function closeLabelModal() {
-    elements.labelModal.classList.remove('active');
-    elements.labelForm.reset();
+    $('#labelModal').classList.remove('active');
+    $('#labelForm').reset();
 }
 
-async function handleLabelSubmit(e) {
+async function createLabel(e) {
     e.preventDefault();
     
     await API.createLabel({
-        name: elements.labelName.value.trim(),
-        color: elements.labelColor.value
+        name: $('#labelName').value.trim(),
+        color: $('#labelColor').value
     });
     
-    showToast('Label created', 'success');
     closeLabelModal();
     await loadLabels();
+    showToast('Label created', 'success');
 }
 
-window.deleteLabelAction = async function(id) {
-    const confirmed = await showConfirm('Delete Label', 'Remove this label from all tasks?');
-    if (confirmed) {
-        await API.deleteLabel(id);
-        showToast('Label deleted', 'success');
-        await loadLabels();
-        await loadTasks();
-    }
-};
+// ==================== Delete Confirmation ====================
+let deleteAction = null;
 
-// ==================== Filter Actions ====================
-window.filterByProject = function(projectId) {
-    state.filters.project_id = state.filters.project_id === projectId ? null : projectId;
-    loadTasks();
-};
-
-window.filterByLabel = function(labelId) {
-    state.filters.label_id = state.filters.label_id === labelId ? null : labelId;
-    loadTasks();
-};
-
-window.clearFilter = function(filterKey) {
-    state.filters[filterKey] = filterKey === 'search' ? '' : null;
-    if (filterKey === 'search') elements.searchInput.value = '';
-    loadTasks();
-};
-
-const handleSearch = debounce((term) => {
-    state.filters.search = term;
-    loadTasks();
-}, 300);
-
-// ==================== Statistics ====================
-async function loadStatistics() {
-    state.statistics = await API.getStatistics();
-    renderStatistics();
+function confirmDelete(type, id) {
+    const messages = {
+        task: 'Are you sure you want to delete this task?',
+        project: 'Delete this project? Tasks will be kept.',
+        label: 'Delete this label? Tasks will be kept.'
+    };
+    
+    $('#confirmMessage').textContent = messages[type];
+    $('#confirmModal').classList.add('active');
+    
+    deleteAction = async () => {
+        if (type === 'task') await API.deleteTask(id);
+        if (type === 'project') await API.deleteProject(id);
+        if (type === 'label') await API.deleteLabel(id);
+        
+        closeConfirmModal();
+        await Promise.all([loadTasks(), loadProjects(), loadLabels()]);
+        showToast(`${type.charAt(0).toUpperCase() + type.slice(1)} deleted`, 'success');
+    };
 }
 
-// ==================== Archive ====================
-async function loadArchive() {
-    state.tasks = await API.getTasks({ include_archived: true });
-    renderArchive();
+function closeConfirmModal() {
+    $('#confirmModal').classList.remove('active');
+    deleteAction = null;
 }
 
 // ==================== Export ====================
 async function exportData() {
     const data = await API.exportJSON();
+    if (!data) return;
+    
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'taskflow-export.json';
+    a.download = `taskflow-export-${new Date().toISOString().split('T')[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast('Data exported successfully', 'success');
+    
+    showToast('Data exported', 'success');
+}
+
+// ==================== Utilities ====================
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatDate(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function getDueDateClass(dateStr) {
+    const due = new Date(dateStr);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    due.setHours(0, 0, 0, 0);
+    
+    const diff = (due - today) / (1000 * 60 * 60 * 24);
+    if (diff < 0) return 'overdue';
+    if (diff <= 2) return 'soon';
+    return '';
 }
 
 // ==================== Event Listeners ====================
-// Task modal
-$('#addTaskBtn').addEventListener('click', () => openTaskModal());
-$('#closeTaskModal').addEventListener('click', closeTaskModal);
-$('#cancelTask').addEventListener('click', closeTaskModal);
-elements.taskForm.addEventListener('submit', handleTaskSubmit);
-$('#addSubtaskBtn').addEventListener('click', addSubtask);
-$('#addCommentBtn').addEventListener('click', addComment);
-elements.newSubtaskInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') { e.preventDefault(); addSubtask(); } });
-
-// Project modal
-$('#addProjectBtn').addEventListener('click', openProjectModal);
-$('#closeProjectModal').addEventListener('click', closeProjectModal);
-$('#cancelProject').addEventListener('click', closeProjectModal);
-elements.projectForm.addEventListener('submit', handleProjectSubmit);
-
-// Label modal
-$('#addLabelBtn').addEventListener('click', openLabelModal);
-$('#closeLabelModal').addEventListener('click', closeLabelModal);
-$('#cancelLabel').addEventListener('click', closeLabelModal);
-elements.labelForm.addEventListener('submit', handleLabelSubmit);
-
-// Navigation
-$$('.nav-item[data-view]').forEach(item => {
-    item.addEventListener('click', () => switchView(item.dataset.view));
-});
-
-// Search
-elements.searchInput.addEventListener('input', (e) => handleSearch(e.target.value));
-
-// Theme
-elements.themeToggle.addEventListener('click', toggleTheme);
-
-// Export
-$('#exportBtn').addEventListener('click', exportData);
-
-// Mobile menu
-elements.mobileMenuBtn.addEventListener('click', () => {
-    elements.sidebar.classList.toggle('open');
-});
-
-// Close modals on overlay click
-[elements.taskModal, elements.projectModal, elements.labelModal].forEach(modal => {
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal.classList.remove('active');
+document.addEventListener('DOMContentLoaded', () => {
+    // Theme toggle
+    const themeToggle = $('#themeToggle');
+    if (themeToggle) themeToggle.addEventListener('click', toggleTheme);
+    
+    // Task modal
+    const addTaskBtn = $('#addTaskBtn');
+    if (addTaskBtn) addTaskBtn.addEventListener('click', () => openTaskModal());
+    
+    const closeTaskModalBtn = $('#closeTaskModal');
+    if (closeTaskModalBtn) closeTaskModalBtn.addEventListener('click', closeTaskModal);
+    
+    const cancelTaskBtn = $('#cancelTask');
+    if (cancelTaskBtn) cancelTaskBtn.addEventListener('click', closeTaskModal);
+    
+    const taskForm = $('#taskForm');
+    if (taskForm) taskForm.addEventListener('submit', handleTaskSubmit);
+    
+    // Confirm modal
+    const confirmActionBtn = $('#confirmAction');
+    if (confirmActionBtn) confirmActionBtn.addEventListener('click', () => deleteAction && deleteAction());
+    
+    // Search
+    const searchInput = $('#searchInput');
+    if (searchInput) {
+        let searchTimeout;
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                state.filters.search = e.target.value;
+                loadTasks();
+                renderFilterChips();
+            }, 300);
+        });
+    }
+    
+    // Subtask input enter
+    const subtaskInput = $('#newSubtaskInput');
+    if (subtaskInput) {
+        subtaskInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addSubtask();
+            }
+        });
+    }
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeTaskModal();
+            closeProjectModal();
+            closeLabelModal();
+            closeConfirmModal();
+        }
+        if (e.key === 'n' && e.ctrlKey) {
+            e.preventDefault();
+            openTaskModal();
+        }
     });
-});
-
-// Keyboard shortcuts
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        closeTaskModal();
-        closeProjectModal();
-        closeLabelModal();
-        elements.confirmModal.classList.remove('active');
-    }
-    if (e.key === 'n' && (e.ctrlKey || e.metaKey)) {
-        e.preventDefault();
-        openTaskModal();
-    }
-    if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
-        e.preventDefault();
-        elements.searchInput.focus();
-    }
+    
+    // Close modals on overlay click
+    $$('.modal-overlay').forEach(overlay => {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                overlay.classList.remove('active');
+            }
+        });
+    });
 });
 
 // ==================== Initialize ====================
@@ -963,13 +876,14 @@ async function init() {
     
     try {
         await Promise.all([
+            loadUser(),
             loadProjects(),
             loadLabels(),
             loadTasks()
         ]);
     } catch (error) {
         console.error('Init error:', error);
-        showToast('Failed to load data: ' + error.message, 'error');
+        showToast('Failed to load data', 'error');
     } finally {
         hideLoading();
     }
